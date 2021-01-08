@@ -1,5 +1,7 @@
 namespace PalabratorFs.Handlers
 
+open FsToolkit.ErrorHandling
+open FsToolkit.ErrorHandling.Operator.TaskResult
 open Microsoft.AspNetCore.Authentication.JwtBearer
 open Microsoft.AspNetCore.Http
 open FSharp.Control.Tasks
@@ -25,73 +27,84 @@ module private Responses =
     let forbidden (msg: string) =
         RequestErrors.FORBIDDEN { message = msg }
 
-    let unprocessableEntity (msg: string) =
-        RequestErrors.UNPROCESSABLE_ENTITY { message = msg }
+    let serverError (msg: string) =
+        ServerErrors.INTERNAL_ERROR { message = msg }
 
 [<RequireQualifiedAccess>]
 module Auth =
+    type AuthErrors =
+        | BadRequest of string
+        | Unauthorized of string
+        | ServerError of string
+
     let Login =
         fun (next: HttpFunc) (ctx: HttpContext) ->
-            task {
-                match! Helpers.TryBindJsonAsync<LoginPayload> ctx with
-                | None -> return! badRequest "Missing Login Info" next ctx
-                | Some payload ->
-                    match! Users.VerifyPassword payload.email payload.password with
-                    | false -> return! unauthorized "Invalid Credentials" next ctx
-                    | true ->
-                        let claims =
-                            [ Claim(ClaimTypes.Email, payload.email) ]
+            taskResult {
+                let! payload =
+                    Helpers.TryBindJsonAsync<LoginPayload> ctx
+                    |> TaskResult.requireSome (BadRequest "Missing Login Info")
 
-                        let token =
-                            generateJWT
-                                (Helpers.JwtSecret, "HS256")
-                                "http://localhost:5000"
-                                (DateTime.Now.AddDays(1.0))
-                                claims
+                do! Users.VerifyPassword payload.email payload.password
+                    |> TaskResult.requireTrue (Unauthorized "Invalid Credentials")
 
-                        return!
-                            json
-                                {| email = payload.email
-                                   token = token |}
-                                next
-                                ctx
+                let claims =
+                    [ Claim(ClaimTypes.Email, payload.email) ]
+
+                let token =
+                    generateJWT (Helpers.JwtSecret, "HS256") "http://localhost:5000" (DateTime.Now.AddDays(1.0)) claims
+
+                return
+                    {| email = payload.email
+                       token = token |}
             }
+            |> fun result ->
+                task {
+                    match! result with
+                    | Ok result -> return! json result next ctx
+                    | Error (BadRequest error) -> return! badRequest error next ctx
+                    | Error (Unauthorized error) -> return! unauthorized error next ctx
+                    | Error (ServerError error) -> return! serverError error next ctx
+                }
 
     let Signup =
         fun (next: HttpFunc) (ctx: HttpContext) ->
-            task {
-                match! Helpers.TryBindJsonAsync<SignupPayload> ctx with
-                | None -> return! badRequest "Missing Signup Info" next ctx
-                | Some payload ->
-                    match! Users.Exists payload.email with
-                    | true -> return! badRequest "That email already exists" next ctx
-                    | false ->
-                        match! Users.Create payload with
-                        | false ->
-                            return!
-                                unprocessableEntity "The email is available but we could not create the user" next ctx
-                        | true ->
-                            let claims =
-                                [ Claim(ClaimTypes.Email, payload.email) ]
+            taskResult {
+                let! payload =
+                    Helpers.TryBindJsonAsync<SignupPayload> ctx
+                    |> TaskResult.requireSome (BadRequest "Missing Signup Info")
 
-                            let token =
-                                generateJWT
-                                    (Helpers.JwtSecret, "HS256")
-                                    "http://localhost:5000"
-                                    (DateTime.Now.AddDays(1.0))
-                                    claims
+                do! Users.Exists payload.email
+                    |> TaskResult.requireFalse (BadRequest "That email already exists")
 
-                            return!
-                                created
-                                    {| email = payload.email
-                                       token = token |}
-                                    next
-                                    ctx
+                do! Users.Create payload
+                    |> TaskResult.requireTrue (ServerError "The email is available but we could not create the user")
+
+                let claims =
+                    [ Claim(ClaimTypes.Email, payload.email) ]
+
+                let token =
+                    generateJWT (Helpers.JwtSecret, "HS256") "http://localhost:5000" (DateTime.Now.AddDays(1.0)) claims
+
+                return
+                    {| email = payload.email
+                       token = token |}
             }
+            |> fun result ->
+                task {
+                    match! result with
+                    | Ok result -> return! created result next ctx
+                    | Error (BadRequest error) -> return! badRequest error next ctx
+                    | Error (ServerError error) -> return! serverError error next ctx
+                    | Error (Unauthorized error) -> return! unauthorized error next ctx
+                }
 
 
 [<RequireQualifiedAccess>]
 module Profiles =
+    type ProfileErrors =
+        | Forbidden of string
+        | BadRequest of string
+        | ServerError of string
 
     let ProfilesList =
         fun (next: HttpFunc) (ctx: HttpContext) ->
@@ -105,64 +118,91 @@ module Profiles =
                     return! json results next ctx
             }
 
+
     let Add =
         fun (next: HttpFunc) (ctx: HttpContext) ->
-            task {
-                match! Helpers.TryExtractUserFromRequest ctx with
-                | None -> return! forbidden "You don't have access to this resource" next ctx
-                | Some user ->
-                    match! Helpers.TryBindJsonAsync<ProfilePayload> ctx with
-                    | None -> return! badRequest "Missing Profile Information" next ctx
-                    | Some payload ->
-                        match! Profiles.Exists user._id payload.name with
-                        | true -> return! badRequest "That profile already exists" next ctx
-                        | false ->
-                            match! Profiles.Create payload with
-                            | false ->
-                                return!
-                                    unprocessableEntity
-                                        "The profile name is available but we couldn't create it"
-                                        next
-                                        ctx
-                            | true ->
-                                let (page, limit) = Helpers.ExtractPagination ctx
-                                let! profiles = Profiles.Find user._id (Some page) (Some limit)
-                                return! created profiles next ctx
+            taskResult {
+                let! user =
+                    Helpers.TryExtractUserFromRequest ctx
+                    |> TaskResult.requireSome (Forbidden "You don't have access to this resource")
+
+                let! payload =
+                    Helpers.TryBindJsonAsync<ProfilePayload> ctx
+                    |> TaskResult.requireSome (BadRequest "Missing Profile Information")
+
+                do! Profiles.Exists user._id payload.name
+                    |> TaskResult.requireFalse (BadRequest "That profile already exists")
+
+                do! Profiles.Create payload
+                    |> TaskResult.requireTrue (ServerError "The profile name is available but we couldn't create it")
+
+                let (page, limit) = Helpers.ExtractPagination ctx
+                return! Profiles.Find user._id (Some page) (Some limit)
             }
+            |> fun result ->
+                task {
+                    match! result with
+                    | Ok result -> return! created result next ctx
+                    | Error (Forbidden error) -> return! forbidden error next ctx
+                    | Error (BadRequest error) -> return! badRequest error next ctx
+                    | Error (ServerError error) -> return! badRequest error next ctx
+                }
 
     let Update =
         fun (next: HttpFunc) (ctx: HttpContext) ->
-            task {
-                match! Helpers.TryExtractUserFromRequest ctx with
-                | None -> return! forbidden "You don't have access to this resource" next ctx
-                | Some user ->
-                    match! Helpers.TryBindJsonAsync<Profile> ctx with
-                    | None -> return! badRequest "The Profile is not present in the request" next ctx
-                    | Some payload ->
-                        if payload.owner <> user._id then
-                            return! forbidden "You don't have access to this resource" next ctx
-                        else
-                            match! Profiles.Exists user._id payload.name with
-                            | true -> return! badRequest "The Profile name exists already" next ctx
-                            | false ->
-                                match! Profiles.Rename payload._id payload.name with
-                                | false -> return! unprocessableEntity "We were not able to rename the profile" next ctx
-                                | true -> return! json payload next ctx
+            taskResult {
+                let! user =
+                    Helpers.TryExtractUserFromRequest ctx
+                    |> TaskResult.requireSome (Forbidden "You don't have access to this resource")
+
+                let! payload =
+                    Helpers.TryBindJsonAsync<Profile> ctx
+                    |> TaskResult.requireSome (BadRequest "The Profile is not present in the request")
+
+                do! payload.owner <> user._id
+                    |> Result.requireFalse (Forbidden "You don't have access to this resource")
+
+                do! Profiles.Exists user._id payload.name
+                    |> TaskResult.requireFalse (BadRequest "The Profile name exists already")
+
+                do! Profiles.Rename payload._id payload.name
+                    |> TaskResult.requireTrue (ServerError "We were not able to rename the profile")
+
+                return payload
             }
+            |> fun result ->
+                task {
+                    match! result with
+                    | Ok result -> return! json result next ctx
+                    | Error (Forbidden error) -> return! forbidden error next ctx
+                    | Error (BadRequest error) -> return! badRequest error next ctx
+                    | Error (ServerError error) -> return! badRequest error next ctx
+                }
 
     let Delete =
         fun (next: HttpFunc) (ctx: HttpContext) ->
-            task {
-                match! Helpers.TryExtractUserFromRequest ctx with
-                | None -> return! forbidden "You don't have access to this resource" next ctx
-                | Some user ->
-                    match! Helpers.TryBindJsonAsync<Profile> ctx with
-                    | None -> return! badRequest "The Profile is not present in the request" next ctx
-                    | Some payload ->
-                        if payload.owner <> user._id then
-                            return! forbidden "You don't have access to this resource" next ctx
-                        else
-                            match! Profiles.Delete payload._id payload.owner with
-                            | false -> return! unprocessableEntity "We were not able to delete this profile" next ctx
-                            | true -> return! setStatusCode 204 next ctx
+            taskResult {
+                let! user =
+                    Helpers.TryExtractUserFromRequest ctx
+                    |> TaskResult.requireSome (Forbidden "You don't have access to this resource")
+
+                let! payload =
+                    Helpers.TryBindJsonAsync<Profile> ctx
+                    |> TaskResult.requireSome (BadRequest "The Profile is not present in the request")
+
+                do! payload.owner <> user._id
+                    |> Result.requireFalse (Forbidden "You don't have access to this resource")
+
+                do! Profiles.Delete payload._id payload.owner
+                    |> TaskResult.requireTrue (ServerError "You don't have access to this resource")
+
+                return ()
             }
+            |> fun result ->
+                task {
+                    match! result with
+                    | Ok () -> return! setStatusCode 204 next ctx
+                    | Error (Forbidden error) -> return! forbidden error next ctx
+                    | Error (BadRequest error) -> return! badRequest error next ctx
+                    | Error (ServerError error) -> return! badRequest error next ctx
+                }
