@@ -1,64 +1,43 @@
-namespace SpicySpa
-
+namespace PalabratorFs
 
 open System
-open System.IO
 open System.Text.Json
 open System.Text.Json.Serialization
 open System.Threading.Tasks
+open FSharp.Control.Tasks
 
 open Microsoft.AspNetCore.Http
-open Microsoft.AspNetCore.Antiforgery
 
 open Giraffe
 open Giraffe.Serialization
-
-open FSharp.Control.Tasks
-open Scriban
 open MongoDB.Bson
+open System.Security.Claims
 
 [<RequireQualifiedAccess>]
 module Helpers =
+    type ObjectIdConverter() =
+        inherit JsonConverter<ObjectId>()
+
+        override _.Read(reader: byref<Utf8JsonReader>, typeToConvert: Type, options: JsonSerializerOptions) =
+            ObjectId.Parse(reader.GetString())
+
+        override _.Write(writer: Utf8JsonWriter, value: ObjectId, options: JsonSerializerOptions) =
+            writer.WriteStringValue(value.ToString())
 
 
-    [<Literal>]
-    let private Components = "./Views/Components"
-
-    [<Literal>]
-    let private Layouts = "./Views/Layouts"
-
-    [<Literal>]
-    let private Pages = "./Views/Pages"
-
-    type HtmlKind =
-        | Component of name: string
-        | Layout of name: string
-        | Page of section: string * name: string
-        | Partial of section: string * name: string
-
-    let getHtmlPath (kind: HtmlKind) =
-        match kind with
-        | Component name -> $"{Components}/{name}.html"
-        | Layout name -> $"{Layouts}/{name}.html"
-        | Page (section, name) -> $"{Pages}/{section}/{name}.html"
-        | Partial (section, name) -> $"{Pages}/{section}/Partials/{name}.html"
-
-    let getTemplate (path: string) =
+    let TryExtractUserFromRequest (ctx: HttpContext) =
         task {
-            let path = Path.GetFullPath(path)
-            let! content = File.ReadAllTextAsync(path)
-            return Template.Parse(content, path)
+            let emailClaim =
+                ctx.User.FindFirst(fun claim -> claim.Type = ClaimTypes.Email)
+                |> Option.ofObj
+
+            match emailClaim with
+            | None -> return None
+            | Some claim -> return! Database.Users.FindByEmail(claim.Value)
         }
 
-    /// Creates a hidden input with a CSRF Token
-    /// Also Adds the CSFR Token in the response's cookies
-    let csrfInputWithSideEffects (antiforgery: IAntiforgery) (ctx: HttpContext) =
-        let tokens = antiforgery.GetAndStoreTokens(ctx)
 
-        $"""<input type="hidden" hidden readonly name="%s{tokens.FormFieldName}" value="%s{tokens.RequestToken}">"""
-
-
-    let extractPagination (ctx: HttpContext) =
+    let ExtractPagination (ctx: HttpContext) =
         let page =
             ctx.TryGetQueryStringValue "page"
             |> Option.map
@@ -79,19 +58,19 @@ module Helpers =
 
         (page, limit)
 
+    let TryBindJsonAsync<'T> (ctx: HttpContext) =
+        task {
+            try
+                let! payload = ctx.BindJsonAsync<'T>()
+                return Some payload
+            with ex -> return None
+        }
 
-    type ObjectIdConverter() =
-        inherit JsonConverter<ObjectId>()
 
-        override _.Read(reader: byref<Utf8JsonReader>, typeToConvert: Type, options: JsonSerializerOptions) =
-            ObjectId.Parse(reader.GetString())
-
-        override _.Write(writer: Utf8JsonWriter, value: ObjectId, options: JsonSerializerOptions) =
-            writer.WriteStartObject()
-            writer.WritePropertyName("$oid")
-            writer.WriteStringValue(value.ToString())
-            writer.WriteEndObject()
-
+    let JwtSecret =
+        System.Environment.GetEnvironmentVariable("PALABRATOR_JWT_SECRET")
+        |> Option.ofObj
+        |> Option.defaultValue "wow much secret :9"
 
     let JsonSerializer =
         let opts = JsonSerializerOptions()
@@ -100,7 +79,6 @@ module Helpers =
         opts.IgnoreNullValues <- true
         opts.Converters.Add(JsonFSharpConverter())
         opts.Converters.Add(ObjectIdConverter())
-
         { new IJsonSerializer with
             member __.Deserialize<'T>(arg1: byte []): 'T =
                 let spn = ReadOnlySpan(arg1)

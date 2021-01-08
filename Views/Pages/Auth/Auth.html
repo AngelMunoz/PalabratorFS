@@ -1,8 +1,0 @@
-<article class="is-flex is-flex-direction-column is-align-items-center">
-    {{ if flash }}
-        {{ flash | object.eval_template }}
-    {{ end }}
-    {{ antiforgery | object.eval_template }}
-    {{ auth_form | object.eval_template }}
-</article>
-

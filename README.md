@@ -1,4 +1,4 @@
-# SpicySpa
+# PalabratorFs
 
 Just a little sample using Saturn, Turbolinks and htmx
 

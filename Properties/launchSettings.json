@@ -1,6 +1,6 @@
 {
   "profiles": {
-    "SpicySpa": {
+    "PalabratorFs": {
       "commandName": "Project",
       "launchBrowser": true,
       "environmentVariables": {

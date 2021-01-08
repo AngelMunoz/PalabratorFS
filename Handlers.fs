@@ -1,536 +1,240 @@
-namespace SpicySpa.Handlers
+namespace PalabratorFs.Handlers
 
-open System.Security.Claims
-
-open Microsoft.AspNetCore.Antiforgery
-open Microsoft.AspNetCore.Authentication
-open Microsoft.AspNetCore.Authentication.Cookies
 open Microsoft.AspNetCore.Http
+open FSharp.Control.Tasks
+open Giraffe
+open Saturn.Auth
 
 open MongoDB.Bson
-
-open FSharp.Control.Tasks
-
-open Giraffe
-open Giraffe.HttpStatusCodeHandlers
-
-open Scriban
-
-open SpicySpa
-open SpicySpa.Database
+open PalabratorFs
+open PalabratorFs.Database
+open System
+open System.Security.Claims
+open Saturn.Controller
 
 [<RequireQualifiedAccess>]
 module Auth =
-
-    let private authForm (isLogin: bool) =
-        task {
-            let! template =
-                let partial = Helpers.Partial("Auth", "AuthForm")
-
-                let path = Helpers.getHtmlPath partial
-                Helpers.getTemplate path
-
-            return! template.RenderAsync({| isLogin = isLogin |})
-        }
-
     let Login =
         fun (next: HttpFunc) (ctx: HttpContext) ->
             task {
-                if not ctx.User.Identity.IsAuthenticated then
-                    let antiforgery = ctx.GetService<IAntiforgery>()
-
-                    let antiforgeryTpl =
-                        Helpers.csrfInputWithSideEffects antiforgery ctx
-
-                    let! contentTemplate =
-                        let page = Helpers.Page("Auth", "Auth")
-                        let path = Helpers.getHtmlPath page
-                        Helpers.getTemplate path
-
-                    let! form = authForm true
-
-                    let! contentTpl =
-                        contentTemplate.RenderAsync
-                            {| antiforgery = antiforgeryTpl
-                               AuthForm = form |}
-
-
-                    let! html =
-                        let styles =
-                            ResizeArray([ """<link rel="stylesheet" href="auth.css">""" ])
-
-                        Layouts.Custom "Welcome" contentTpl None None (Some styles) None
-
-                    return! htmlString html next ctx
-                else
-                    return! redirectTo false "/profile" next ctx
-
-            }
-
-    let SignUp =
-        fun (next: HttpFunc) (ctx: HttpContext) ->
-            task {
-                if not ctx.User.Identity.IsAuthenticated then
-                    let antiforgery = ctx.GetService<IAntiforgery>()
-
-                    let antiforgeryTpl =
-                        Helpers.csrfInputWithSideEffects antiforgery ctx
-
-                    let! contentTemplate =
-                        let page = Helpers.Page("Auth", "Auth")
-                        let path = Helpers.getHtmlPath page
-                        Helpers.getTemplate path
-
-                    let! form = authForm false
-
-                    let! contentTpl =
-                        contentTemplate.RenderAsync
-                            {| antiforgery = antiforgeryTpl
-                               AuthForm = form |}
-
-
-                    let! html =
-                        let styles =
-                            ResizeArray([ """<link rel="stylesheet" href="auth.css">""" ])
-
-                        Layouts.Custom "Welcome" contentTpl None None (Some styles) None
-
-                    return! htmlString html next ctx
-                else
-                    return! redirectTo false "/profile" next ctx
-
-            }
-
-    let private getErrorResponse (antiforgeryTpl: string) (message: string) (action: ActionType) =
-        task {
-            let! contentTemplate =
-                let page = Helpers.Page("Auth", "Auth")
-                let path = Helpers.getHtmlPath page
-                Helpers.getTemplate path
-
-            let! form = authForm false
-            let! flash = Components.Flash message (Some action)
-
-            return!
-                contentTemplate.RenderAsync
-                    {| antiforgery = antiforgeryTpl
-                       AuthForm = form
-                       flash = flash |}
-        }
-
-    let ProcessLogin =
-
-
-        fun (next: HttpFunc) (ctx: HttpContext) ->
-            task {
-                let! payload = ctx.TryBindFormAsync<LoginPayload>()
+                let! payload = Helpers.TryBindJsonAsync<LoginPayload>(ctx)
 
                 match payload with
-                | Ok payload ->
-                    printfn $"%A{payload}"
-
+                | None ->
+                    return!
+                        (setStatusCode 400
+                         >=> json {| message = "Missing Login Info" |})
+                            next
+                            ctx
+                | Some payload ->
                     let! canLogin = Users.VerifyPassword payload.email payload.password
 
-                    if canLogin then
-                        let! user = Users.FindUserByEmail payload.email
-
-                        match user with
-                        | Some user ->
-                            let principal =
-                                ClaimsPrincipal(
-                                    ClaimsIdentity(
-                                        [ Claim(ClaimTypes.Name, user.name)
-                                          Claim(ClaimTypes.NameIdentifier, user._id.ToString())
-                                          Claim(ClaimTypes.Email, user.email) ],
-                                        CookieAuthenticationDefaults.AuthenticationScheme
-                                    )
-                                )
-
-                            do! ctx.SignInAsync(principal)
-                            return! redirectTo false "/profile" next ctx
-                        | None ->
-                            let antiforgery = ctx.GetService<IAntiforgery>()
-
-                            let antiforgeryTpl =
-                                Helpers.csrfInputWithSideEffects antiforgery ctx
-
-                            let! content = getErrorResponse antiforgeryTpl "Not Found" ActionType.Warning
-
-                            return! RequestErrors.badRequest (htmlString content) next ctx
+                    if not canLogin then
+                        return!
+                            (setStatusCode 401
+                             >=> json {| message = "Invalid Credentials" |})
+                                next
+                                ctx
                     else
-                        let antiforgery = ctx.GetService<IAntiforgery>()
+                        let claims =
+                            [ Claim(ClaimTypes.Email, payload.email) ]
 
-                        let antiforgeryTpl =
-                            Helpers.csrfInputWithSideEffects antiforgery ctx
+                        let token =
+                            generateJWT
+                                (Helpers.JwtSecret, "HS256")
+                                "http://localhost:5000"
+                                (DateTime.Now.AddDays(1.0))
+                                claims
 
-                        let! content = getErrorResponse antiforgeryTpl "Not Found" ActionType.Warning
-
-                        return! RequestErrors.badRequest (htmlString content) next ctx
-                | Error err ->
-                    let antiforgery = ctx.GetService<IAntiforgery>()
-
-                    let antiforgeryTpl =
-                        Helpers.csrfInputWithSideEffects antiforgery ctx
-
-                    let! content = getErrorResponse antiforgeryTpl err ActionType.Danger
-
-                    return! RequestErrors.badRequest (htmlString content) next ctx
+                        return!
+                            json
+                                {| email = payload.email
+                                   token = token |}
+                                next
+                                ctx
             }
 
-    let ProcessSignup =
+    let Signup =
         fun (next: HttpFunc) (ctx: HttpContext) ->
             task {
-                let! payload = ctx.TryBindFormAsync<SignupPayload>()
+                let! payload = Helpers.TryBindJsonAsync<SignupPayload>(ctx)
 
                 match payload with
-                | Ok payload ->
-                    printfn $"%A{payload}"
+                | None ->
+                    return!
+                        (setStatusCode 400
+                         >=> json {| message = "Missing Signup Info" |})
+                            next
+                            ctx
+                | Some payload ->
+                    let! exists = Users.Exists payload.email
 
-                    let! result = Users.CreateUser payload
-
-                    if result.ok > 0.0 then
-                        let! user = Users.FindUserByEmail payload.email
-
-                        match user with
-                        | Some user ->
-                            let principal =
-                                ClaimsPrincipal(
-                                    ClaimsIdentity(
-                                        [ Claim(ClaimTypes.Name, user.name)
-                                          Claim(ClaimTypes.NameIdentifier, user._id.ToString())
-                                          Claim(ClaimTypes.Email, user.email) ],
-                                        CookieAuthenticationDefaults.AuthenticationScheme
-                                    )
-                                )
-
-                            do! ctx.SignInAsync(principal)
-                            return! redirectTo false "/profile" next ctx
-                        | None ->
-                            let antiforgery = ctx.GetService<IAntiforgery>()
-
-                            let antiforgeryTpl =
-                                Helpers.csrfInputWithSideEffects antiforgery ctx
-
-                            let! content =
-                                getErrorResponse antiforgeryTpl "Created But failed to fetch it" ActionType.Warning
-
-                            return! RequestErrors.badRequest (htmlString content) next ctx
-
+                    if exists then
+                        return!
+                            (setStatusCode 400
+                             >=> json {| message = "That email already exists" |})
+                                next
+                                ctx
                     else
-                        let antiforgery = ctx.GetService<IAntiforgery>()
+                        let! created = Users.Create payload
 
-                        let antiforgeryTpl =
-                            Helpers.csrfInputWithSideEffects antiforgery ctx
+                        if created then
+                            let claims =
+                                [ Claim(ClaimTypes.Email, payload.email) ]
 
-                        let! content = getErrorResponse antiforgeryTpl "Failed to create user" ActionType.Warning
+                            let token =
+                                generateJWT
+                                    (Helpers.JwtSecret, "HS256")
+                                    "http://localhost:5000"
+                                    (DateTime.Now.AddDays(1.0))
+                                    claims
 
-                        return! RequestErrors.badRequest (htmlString content) next ctx
-                | Error err ->
+                            return!
+                                json
+                                    {| email = payload.email
+                                       token = token |}
+                                    next
+                                    ctx
+                        else
+                            return!
+                                (setStatusCode 422
+                                 >=> json {| message = "The email is available but we could not create the user" |})
+                                    next
+                                    ctx
 
-                    let antiforgery = ctx.GetService<IAntiforgery>()
-
-                    let antiforgeryTpl =
-                        Helpers.csrfInputWithSideEffects antiforgery ctx
-
-                    let! content = getErrorResponse antiforgeryTpl err ActionType.Danger
-
-                    return! RequestErrors.badRequest (htmlString content) next ctx
             }
 
 
 [<RequireQualifiedAccess>]
-module Profile =
-    let private infoPartial (user: UserDTO) (flash: string option) =
-        task {
-            let flash = defaultArg flash null
-            let! cardHeader = Components.CardHeader "My Profile" None
+module Profiles =
 
-            let! cardContent =
-                task {
-                    let path =
-                        let kind =
-                            Helpers.HtmlKind.Partial("Profile", "ProfileInfo")
-
-                        Helpers.getHtmlPath kind
-
-                    let! template = Helpers.getTemplate (path)
-                    return! template.RenderAsync(user)
-                }
-
-            let! footer =
-                let actions =
-                    ResizeArray(
-                        [ """
-                        <a class="card-footer-item" hx-get="/profile/edit" hx-swap="outerHTML" hx-target="#infopartial">
-                            Edit
-                        </a>
-                        """ ]
-                    )
-
-                Components.CardActionsFooter actions
-
-            let! content = Components.CustomCard cardContent (cardHeader |> Some) (footer |> Some)
-
-            let tpl =
-                Template.Parse
-                    """
-                    <article id="infopartial">
-                        {{ flash | object.eval_template }}
-                        {{ content | object.eval_template }}
-                    </article>
-                    """
-
-            return! tpl.RenderAsync {| flash = flash; content = content |}
-        }
-
-    let Index =
+    let ProfilesList =
         fun (next: HttpFunc) (ctx: HttpContext) ->
             task {
-                let! user =
-                    let claim =
-                        ctx.User.FindFirst(ClaimTypes.NameIdentifier)
-
-                    let _id = ObjectId.Parse(claim.Value)
-                    Users.FindUser _id
+                let! user = Helpers.TryExtractUserFromRequest ctx
 
                 match user with
                 | None ->
-                    let! flash = Components.Flash "Not Found" (Some ActionType.Warning)
-
-                    let content = """
-                        <article id="infopartial">
-                          <h1>A bad request was sent</h1>
-                          <p> We were unable to get the information to update the user</p>
-                          {{ flash | object.eval_template }}
-                        </article>
-                        """
-
-                    let! content =
-                        Template
-                            .Parse(content)
-                            .RenderAsync({| flash = flash |})
-
-                    return! htmlString content next ctx
+                    return!
+                        (setStatusCode 403
+                         >=> json {| message = "You don't have access to this resource" |})
+                            next
+                            ctx
                 | Some user ->
-                    let! partial = infoPartial user None
+                    let (page, limit) = Helpers.ExtractPagination ctx
+                    let! results = Profiles.Find user._id (Some page) (Some limit)
 
-                    let! tpl =
-                        let page = Helpers.Page("Profile", "Profile")
-                        let path = Helpers.getHtmlPath page
-                        Helpers.getTemplate path
-
-                    let! content = tpl.RenderAsync({| content = partial |})
-
-                    let! navbar =
-                        let items =
-                            ResizeArray([ """<a href="/products" class="navbar-menu-item">Products</a>""" ])
-
-                        Components.Navbar(Some items)
-
-                    let! html =
-                        Layouts.Custom
-                            "Spicy Spa"
-                            content
-                            (Some navbar)
-                            None
-                            (Some(ResizeArray([ """<script src="WebComponents/Sample.js" type="module"></script>""" ])))
-                            None
-
-                    return! htmlString html next ctx
+                    return! json results next ctx
             }
 
-    let UserInfoPartial =
+    let Add =
         fun (next: HttpFunc) (ctx: HttpContext) ->
             task {
-                let! user = ctx.TryBindFormAsync<EditFormPayload>()
-
-                let _id =
-                    let claim =
-                        ctx.User.FindFirst(ClaimTypes.NameIdentifier)
-
-                    ObjectId.Parse(claim.Value)
+                let! user = Helpers.TryExtractUserFromRequest ctx
 
                 match user with
-                | Ok user ->
+                | None ->
+                    return!
+                        (setStatusCode 403
+                         >=> json {| message = "You don't have access to this resource" |})
+                            next
+                            ctx
+                | Some user ->
+                    let! payload = Helpers.TryBindJsonAsync<ProfilePayload> ctx
 
-                    let! saveOp = Users.UpdateFields _id (Some user.name) None
-
-                    if saveOp.ok > 0.0 && saveOp.nModified > 0 then
-                        let! user = Users.FindUser _id
-
-                        match user with
-                        | None ->
-                            let! flash = Components.Flash "User Not Found" (Some ActionType.Danger)
-
-                            let partial = """
-                                <article id="infopartial">
-                                  <h1>Hmm... something weird just happened</h1>
-                                  <p> We were unable to get the information to update the user</p>
-                                  {{ flash | object.eval_template }}
-                                </article>"""
-
-                            let! content =
-                                Template
-                                    .Parse(partial)
-                                    .RenderAsync({| flash = flash |})
-
-                            return! ServerErrors.internalError (htmlString content) next ctx
-                        | Some user ->
-
-                            let! partial = infoPartial user None
-
-                            let tpl = Template.Parse(partial)
-                            let! content = tpl.RenderAsync()
-                            return! htmlString content next ctx
-                    else
-                        let! flash = Components.Flash "Couldn't get name from form" (Some ActionType.Danger)
-
-                        let partial = """
-                            <article id="infopartial">
-                              <h1>Hmm... something weird just happened</h1>
-                              <p> We were unable to get the information to update the user</p>
-                              {{ flash | object.eval_template }}
-                            </article>"""
-
-                        let! content =
-                            Template
-                                .Parse(partial)
-                                .RenderAsync({| flash = flash |})
-
-                        return! ServerErrors.internalError (htmlString content) next ctx
-                | Error err ->
-                    let! flash = Components.Flash err (Some ActionType.Warning)
-
-                    let partial = """
-                        <article id="infopartial">
-                          <h1>A bad request was sent</h1>
-                          <p> We were unable to get the information to update the user</p>
-                          {{ flash | object.eval_template }}
-                        </article>"""
-
-                    let! content =
-                        Template
-                            .Parse(partial)
-                            .RenderAsync({| flash = flash |})
-
-                    return! RequestErrors.badRequest (htmlString content) next ctx
-            }
-
-    let EditUserInfoPartial =
-        fun (next: HttpFunc) (ctx: HttpContext) ->
-            task {
-                let antiforgery = ctx.GetService<IAntiforgery>()
-
-                let! cardHeader = Components.CardHeader "Update My Profile" None
-
-                let! cardContent =
-                    task {
-                        let! tpl =
-                            let page =
-                                Helpers.Partial("Profile", "ProfileForm")
-
-                            let path = Helpers.getHtmlPath page
-                            Helpers.getTemplate path
-
-                        let! user =
-                            let claim =
-                                ctx.User.FindFirst(ClaimTypes.NameIdentifier)
-
-                            let _id = ObjectId.Parse(claim.Value)
-                            Users.FindUser _id
-
+                    match payload with
+                    | None ->
                         return!
-                            match user with
-                            | Some user -> tpl.RenderAsync({| name = user.name |})
-                            | None -> tpl.RenderAsync()
-                    }
+                            (setStatusCode 400
+                             >=> json {| message = "Missing Profile Information" |})
+                                next
+                                ctx
+                    | Some payload ->
+                        match! Profiles.Exists user._id payload.name with
+                        | true ->
+                            return!
+                                (setStatusCode 400
+                                 >=> json {| message = "That profile already exists" |})
+                                    next
+                                    ctx
+                        | false ->
+                            let! result = Profiles.Create payload
 
-                let! footer =
-                    let actions =
-                        ResizeArray(
-                            [ """
-                            <a
-                              class="card-footer-item"
-                              hx-post="/profile/save"
-                              hx-swap="outerHTML"
-                              hx-include="#editform"
-                              hx-target="#editpartial">
-                                Save
-                            </a>
-                            """ ]
-                        )
-
-                    Components.CardActionsFooter actions
-
-                let! card = Components.CustomCard cardContent (Some cardHeader) (Some footer)
-
-                let! html =
-                    let template =
-                        $"""
-                         <article id="editpartial">
-                           %s{Helpers.csrfInputWithSideEffects antiforgery ctx}
-                           %s{card}                         </article>                         """
-
-                    Template.Parse(template).RenderAsync()
-
-                return! htmlString html next ctx
+                            if result then
+                                let! profiles = Profiles.Find user._id None None
+                                return! (setStatusCode 201 >=> json profiles) next ctx
+                            else
+                                return!
+                                    (setStatusCode 422
+                                     >=> json {| message = "The profile name is available but we couldn't create it" |})
+                                        next
+                                        ctx
             }
 
-
-[<RequireQualifiedAccess>]
-module Products =
-
-    let Index =
+    let Update =
         fun (next: HttpFunc) (ctx: HttpContext) ->
             task {
-                let (page, limit) = Helpers.extractPagination ctx
+                let! user = Helpers.TryExtractUserFromRequest ctx
 
-                let! products = Products.FindProducts page limit
-                let! tpl = Helpers.getTemplate (Helpers.getHtmlPath (Helpers.Page("Products", "Products")))
-
-                let serialized =
-                    Helpers.JsonSerializer.SerializeToString products
-
-                let withCountOnly =
-                    Helpers.JsonSerializer.SerializeToString { products with list = [] }
-
-                let items =
-                    {| list =
-                           products.list
-                           |> Seq.map (fun item -> Helpers.JsonSerializer.SerializeToString item) |}
-
-                let! content =
-                    tpl.RenderAsync(
-                        {| serialized = serialized
-                           items = items
-                           withCountOnly = withCountOnly
-                           page = page
-                           limit = limit |}
-                    )
-
-                let! navbar =
-                    let items =
-                        ResizeArray([ """<a href="/profile" class="navbar-menu-item">Profile</a>""" ])
-
-                    Components.Navbar(Some items)
-
-                let! html =
-                    Layouts.Custom
-                        "Spicy Spa"
-                        content
-                        (Some navbar)
-                        None
-                        (Some(ResizeArray([ """<script src="WebComponents/Products.js" type="module"></script>""" ])))
-                        None
-
-                return! htmlString html next ctx
+                match user with
+                | None ->
+                    return!
+                        (setStatusCode 403
+                         >=> json {| message = "You don't have access to this resource" |})
+                            next
+                            ctx
+                | Some user ->
+                    match! Helpers.TryBindJsonAsync<Profile> ctx with
+                    | None ->
+                        return!
+                            (setStatusCode 400
+                             >=> json {| message = "The Profile is not present in the request" |})
+                                next
+                                ctx
+                    | Some payload ->
+                        match! Profiles.Exists user._id payload.name with
+                        | true ->
+                            return!
+                                (setStatusCode 400
+                                 >=> json {| message = "The Profile name exists already" |})
+                                    next
+                                    ctx
+                        | false ->
+                            match! Profiles.Rename payload._id payload.name with
+                            | false ->
+                                return!
+                                    (setStatusCode 422
+                                     >=> json {| message = "We were not able to rename the profile" |})
+                                        next
+                                        ctx
+                            | true -> return! json payload next ctx
             }
 
-    let JsonProducts =
+    let Delete =
         fun (next: HttpFunc) (ctx: HttpContext) ->
             task {
-                let (page, limit) = Helpers.extractPagination ctx
-
-                let! products = Products.FindProducts page limit
-                return! json products next ctx
+                match! Helpers.TryExtractUserFromRequest ctx with
+                | None ->
+                    return!
+                        (setStatusCode 403
+                         >=> json {| message = "You don't have access to this resource" |})
+                            next
+                            ctx
+                | Some user ->
+                    match! Helpers.TryBindJsonAsync<Profile> ctx with
+                    | None ->
+                        return!
+                            (setStatusCode 400
+                             >=> json {| message = "The Profile is not present in the request" |})
+                                next
+                                ctx
+                    | Some payload ->
+                        match! Profiles.Delete payload._id payload.owner with
+                        | false ->
+                            return!
+                                (setStatusCode 422
+                                 >=> json {| message = "We were not able to delete this profile" |})
+                                    next
+                                    ctx
+                        | true -> return! setStatusCode 204 next ctx
             }

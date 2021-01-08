@@ -1,4 +1,4 @@
-namespace SpicySpa
+namespace PalabratorFs
 
 open MongoDB.Bson
 
@@ -11,26 +11,21 @@ type SignupPayload =
       email: string
       password: string }
 
-[<CLIMutable>]
-type User =
+type UserPayload =
     { _id: ObjectId
       name: string
       email: string
       password: string }
 
-[<CLIMutable>]
-type UserDTO =
+type User =
     { _id: ObjectId
       name: string
       email: string }
 
-[<CLIMutable>]
-type EditFormPayload = { name: string }
-
-
-type Product =
+type Profile =
     { _id: ObjectId
-      name: string
-      price: decimal }
+      owner: ObjectId
+      name: string }
 
+type ProfilePayload = { owner: ObjectId; name: string }
 type PaginatedResult<'T> = { list: seq<'T>; count: int }

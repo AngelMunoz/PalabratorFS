@@ -7,24 +7,17 @@
     <Compile Include="Types.fs" />
     <Compile Include="Database.fs" />
     <Compile Include="Helpers.fs" />
-    <Compile Include="Components.fs" />
-    <Compile Include="Layouts.fs" />
     <Compile Include="Handlers.fs" />
     <Compile Include="Program.fs" />
   </ItemGroup>
   <ItemGroup>
-    <Watch Include="Components/**/*.html" />
-    <Watch Include="Pages/**/*.html" />
-    <Watch Include="Layouts/**/*.html" />
-  </ItemGroup>
-  <ItemGroup>
-    <PackageReference Include="BCrypt.Net-Next" Version="4.0.2" />
+    <PackageReference Include="Microsoft.IdentityModel.Tokens" Version="6.8.0" />
+    <PackageReference Include="System.IdentityModel.Tokens.Jwt" Version="6.8.0" />
+    <PackageReference Include="Saturn" Version="0.15.0-preview01" />
+    <PackageReference Include="Ply" Version="0.3.1" />
     <PackageReference Include="FSharp.SystemTextJson" Version="0.15.14" />
+    <PackageReference Include="BCrypt.Net-Next" Version="4.0.2" />
     <PackageReference Include="Mondocks" Version="0.3.18" />
     <PackageReference Include="MongoDB.Driver" Version="2.11.5" />
-    <PackageReference Include="Ply" Version="0.3.1" />
-    <PackageReference Include="Saturn" Version="0.15.0-preview01" />
-    <PackageReference Include="Scriban" Version="3.2.2" />
-    <PackageReference Include="System.Text.Json" Version="5.0.0" />
   </ItemGroup>
 </Project>

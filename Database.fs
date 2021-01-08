@@ -1,4 +1,4 @@
-namespace SpicySpa
+namespace PalabratorFs
 
 open System
 open System.Threading.Tasks
@@ -17,19 +17,22 @@ open BCrypt.Net
 
 module Database =
 
-    let dburl =
-        Environment.GetEnvironmentVariable("SPICY_DB_URL")
+    let private dburl =
+        Environment.GetEnvironmentVariable("PALABRATOR_DB_URL")
         |> Option.ofObj
         |> Option.defaultValue "mongodb://localhost:27017/"
 
     [<Literal>]
-    let private DbName = "spicydb"
+    let private DbName = "palabratorfs"
 
     [<Literal>]
-    let private UsersCol = "spc_users"
+    let private UsersCol = "pal_users"
 
     [<Literal>]
-    let private ProductsCol = "spc_products"
+    let private ProfilesCol = "pal_profiles"
+
+    [<Literal>]
+    let private WordsCol = "pal_words"
 
     let db =
         lazy (MongoClient(dburl).GetDatabase(DbName))
@@ -37,16 +40,19 @@ module Database =
 
     [<RequireQualifiedAccess>]
     module Users =
-        let CreateUser (user: SignupPayload) =
+        let Create (user: SignupPayload) =
             let user =
                 { user with
                       password = BCrypt.EnhancedHashPassword user.password }
 
             let createCmd = insert UsersCol { documents [ user ] }
 
-            db.Value.RunCommandAsync<InsertResult>(JsonCommand createCmd)
+            task {
+                let! result = db.Value.RunCommandAsync<InsertResult>(JsonCommand createCmd)
+                return result.ok = 1.0 && result.n = 1
+            }
 
-        let FindUser (_id: ObjectId) =
+        let FindById (_id: ObjectId) =
             task {
                 let q =
                     find UsersCol {
@@ -54,12 +60,12 @@ module Database =
                         projection {| email = 1; name = 1 |}
                     }
 
-                let! result = db.Value.RunCommandAsync<FindResult<UserDTO>>(JsonCommand q)
+                let! result = db.Value.RunCommandAsync<FindResult<User>>(JsonCommand q)
 
                 return (result.cursor.firstBatch |> Seq.tryHead)
             }
 
-        let FindUserByEmail (email: string) =
+        let FindByEmail (email: string) =
             task {
                 let q =
                     find UsersCol {
@@ -67,11 +73,22 @@ module Database =
                         projection {| email = 1; name = 1 |}
                     }
 
-                let! result = db.Value.RunCommandAsync<FindResult<UserDTO>>(JsonCommand q)
+                let! result = db.Value.RunCommandAsync<FindResult<User>>(JsonCommand q)
 
                 return (result.cursor.firstBatch |> Seq.tryHead)
             }
 
+        let Exists (email: string) =
+            task {
+                let q =
+                    count {
+                        collection UsersCol
+                        query {| email = email |}
+                    }
+
+                let! result = db.Value.RunCommandAsync<CountResult>(JsonCommand q)
+                return result.ok = 1.0 && result.n >= 1
+            }
 
         let VerifyPassword (email: string) (password: string) =
             task {
@@ -89,51 +106,89 @@ module Database =
                     | Some found -> BCrypt.EnhancedVerify(password, found.password)
             }
 
-        let UpdateFields (_id: ObjectId) (name: Option<string>) (password: Option<string>) =
-
-            let updatePwCmd =
-                let updateVal =
-                    let updateSet =
-                        match name, password with
-                        | None, None -> raise (exn "An update must include at least one of [name] or [password]")
-                        | Some name, Some password -> box {| name = name; password = password |}
-                        | Some name, None -> box {| name = name |}
-                        | None, Some password -> box {| password = password |}
-
-                    box
-                        {| q = {| _id = _id |}
-                           u = {| ``$set`` = updateSet |}
-                           upsert = false
-                           multi = false |}
-
-                update UsersCol { updates [ updateVal ] }
-
-            db.Value.RunCommandAsync<UpdateResult>(JsonCommand updatePwCmd)
 
     [<RequireQualifiedAccess>]
-    module Products =
+    module Profiles =
 
-        let FindProducts (page: int) (amount: int): Task<PaginatedResult<Product>> =
+        let Exists (owner: ObjectId) (name: string) =
             task {
-                let queryFilter = {|  |}
+                let countCmd =
+                    count {
+                        collection ProfilesCol
+                        query {| owner = owner; name = name |}
+                    }
 
-                let q =
-                    find ProductsCol {
-                        filter query
+                let! result = db.Value.RunCommandAsync<CountResult>(JsonCommand countCmd)
+
+                return result.n > 0
+            }
+
+        let Find (owner: ObjectId) (page: Option<int>) (limit: Option<int>) =
+            task {
+                let page = defaultArg page 1
+                let amount = defaultArg limit 10
+                let criteria = {| owner = owner |}
+
+                let findCmd =
+                    let offset = (page - 1) * amount
+
+                    find ProfilesCol {
+                        filter criteria
+                        skip offset
                         limit amount
-                        skip ((page - 1) * amount)
                     }
 
                 let countCmd =
                     count {
-                        collection ProductsCol
-                        query queryFilter
+                        collection ProfilesCol
+                        query criteria
                     }
 
-                let! result = db.Value.RunCommandAsync<FindResult<Product>>(JsonCommand q)
+                let! queryResult = db.Value.RunCommandAsync<FindResult<Profile>>(JsonCommand findCmd)
                 let! countResult = db.Value.RunCommandAsync<CountResult>(JsonCommand countCmd)
 
                 return
-                    { list = result.cursor.firstBatch
+                    { list = queryResult.cursor.firstBatch
                       count = countResult.n }
+            }
+
+        let Create (payload: ProfilePayload) =
+            task {
+                let insertCmd =
+                    insert ProfilesCol { documents [ payload ] }
+
+                let! result = db.Value.RunCommandAsync<InsertResult>(JsonCommand insertCmd)
+                return result.n > 0 && result.ok = 1.0
+            }
+
+        let Rename (id: ObjectId) (name: string) =
+            task {
+                let renameCmd =
+                    update ProfilesCol {
+                        updates [
+                            box
+                                {| q = {| _id = id |}
+                                   u = {| ``$set`` = {| name = name |} |}
+                                   multi = false
+                                   upsert = false |}
+                        ]
+                    }
+
+                let! result = db.Value.RunCommandAsync<UpdateResult>(JsonCommand renameCmd)
+                return result.n > 0 && result.ok = 1.0
+            }
+
+        let Delete (id: ObjectId) (owner: ObjectId) =
+            task {
+                let renameCmd =
+                    delete ProfilesCol {
+                        deletes [
+                            box
+                                {| q = {| _id = id; owner = owner |}
+                                   limit = 1 |}
+                        ]
+                    }
+
+                let! result = db.Value.RunCommandAsync<DeleteResult>(JsonCommand renameCmd)
+                return result.n > 0 && result.ok = 1.0
             }
